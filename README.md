@@ -22,7 +22,6 @@ Status: F0 (setup). Not yet run end to end.
 | `src/config.ts` | Settings and the stage table (stages are data). |
 | `src/board/` | Board adapter interface (GitHub first). |
 | `src/agent/` | Agent adapter interface and the Claude Code implementation. |
-| `docs/` | Build handoff and skills draft. |
 
 ## Run
 

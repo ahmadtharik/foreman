@@ -5,3 +5,4 @@ logs/
 *.lock
 .env
 .env.*
+notes/
