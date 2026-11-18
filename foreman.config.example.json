@@ -1,0 +1,12 @@
+{
+  "targetRepo": "your-github-user/whatif",
+  "targetPath": "../whatif",
+  "board": { "kind": "github", "projectNumber": 1 },
+  "autonomy": "plan-approval",
+  "maxRounds": 3,
+  "pollIntervalSec": 180,
+  "claimTimeoutMin": 60,
+  "maxDiffLines": 600,
+  "agentTimeoutMin": 45,
+  "testStartCommand": "npm run start:test"
+}

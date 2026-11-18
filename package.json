@@ -1,0 +1,18 @@
+{
+  "name": "foreman",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Direct a team of AI agents through plan, build and review, using a ticket board as the shared workspace.",
+  "type": "module",
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"test/**/*.test.ts\"",
+    "check": "npm run typecheck && npm test",
+    "check:claude": "node src/scripts/check-claude.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}

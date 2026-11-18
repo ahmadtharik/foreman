@@ -1,0 +1,7 @@
+node_modules/
+foreman.config.json
+runs/
+logs/
+*.lock
+.env
+.env.*
