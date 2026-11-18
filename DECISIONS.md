@@ -30,6 +30,15 @@ A missing or malformed `FOREMAN-RESULT`, a result that does not belong to the st
 
 A returned ticket sits in "In progress" with no claim. That is how the builder trigger tells "waiting for a fix" apart from "being built".
 
+## 2026-11-17: Branch, pull request, CI, squash merge
+
+Every change goes through a pull request, so the repo's history shows the same discipline Foreman asks of its agents. CI is one GitHub Actions job on Ubuntu: `npm ci`, type check, unit tests. It takes about a minute and uses only free Actions minutes.
+
+Left out on purpose:
+- No Windows runner yet. The tests do not spawn processes, so Ubuntu catches the same failures. Add Windows when runner code that spawns `claude` gets tests.
+- No Claude in CI. It would need a login or an API key, and the cost rule rules out the API key. Agent runs are tested locally.
+- No lint step yet. The type check in strict mode covers most of it. Add ESLint if style drift shows up.
+
 ## 2026-11-17: `total_cost_usd` is reported on the plan too
 
 The smoke check showed Claude Code reports a dollar figure even when signed in with the plan. It is an estimate, not a charge. Useful later as a rough "effort" number in run reports.
