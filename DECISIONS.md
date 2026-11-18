@@ -42,3 +42,15 @@ Left out on purpose:
 ## 2026-11-17: `total_cost_usd` is reported on the plan too
 
 The smoke check showed Claude Code reports a dollar figure even when signed in with the plan. It is an estimate, not a charge. Useful later as a rough "effort" number in run reports.
+
+## 2026-11-17: Status lives on labels, not a Projects board
+
+Fine-grained tokens cannot reach Projects boards on a personal account. So status is one `status: ...` label per issue, and claims use a `foreman: claimed` label plus a comment. A board view can be added later with a separate token that only has the `project` scope.
+
+## 2026-11-17: Skills live in `.claude/skills/`
+
+That is where Claude Code finds project skills. Foreman is its own first target, so the skills sit there directly. For another target repo they get copied in.
+
+## 2026-11-17: The planner creates issues through a script
+
+`npm run create-tickets` reads an approved plan file, checks every ticket against the template first, and creates nothing if one fails. Tickets refer to earlier tickets as `#T1` until real issue numbers exist. Plans are committed under `plans/` so edits made at approval can be counted later.

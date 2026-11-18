@@ -27,7 +27,7 @@ You turn one specification into the smallest set of tickets that can each be bui
    - an expected result uses a word like "correctly", "properly", or "as expected"
    - Out of scope is empty
 10. **Show the plan and stop.** Present: a one-paragraph summary, the tickets in order with their dependencies, the files you read, anything you assumed, and anything you left out and why. Wait for approval.
-11. **After approval, create the tickets** on the board in dependency order, with status Backlog. Report the ticket numbers. Do not move any ticket to Ready. The runner does that.
+11. **After approval, create the tickets.** Write the approved plan to `plans/<spec number>.json` as `[{"title": "...", "body": "<ticket template>"}]` in dependency order. To depend on an earlier ticket in the same plan, write `#T1`, `#T2`, and so on. Then run `npm run create-tickets -- <owner/name> plans/<spec number>.json`. It validates every ticket first and creates nothing if any fails. Report the ticket numbers it prints. Do not move any ticket to Ready. The runner does that.
 
 ## Rules
 
