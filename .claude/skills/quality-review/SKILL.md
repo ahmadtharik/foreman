@@ -1,17 +1,17 @@
 ---
 name: quality-review
-description: Strict code quality review of the current branch's diff against main. Reports blockers that must be fixed before a pull request, and optional suggestions. Use before opening any pull request in this repo, or when asked for a quality review.
+description: Strict code quality review of the current branch's diff against origin/main. Reports blockers that must be fixed before a pull request, and optional suggestions. Use before opening any pull request in this repo, or when asked for a quality review.
 ---
 
 # Quality review
 
-You review the diff of the current branch against `main`. You do not edit code. You report.
+You review the diff of the current branch against `origin/main`. You do not edit code. You report.
 
-Ideas drawn from Cursor's thermo-nuclear code quality review, Ponytail's "write less code" ladder, and pstack's root-cause and deslop principles. Written for this repo.
+For doc or skill changes, check that instructions are clear, short, and consistent with the README and the other skills. Apply the code lenses only where they fit.
 
 ## Steps
 
-1. Run `git diff main...HEAD` and read every changed file in full, not just the hunks.
+1. Run `git fetch origin`, then `git diff origin/main...HEAD`. Read every changed file in full, not just the hunks.
 2. Read the code each change touches or calls, so you can judge where logic belongs and what already exists.
 3. Run `npm run check`. If it fails, that is blocker 1 and you can stop.
 4. Go through the three lenses below.
@@ -21,13 +21,13 @@ Ideas drawn from Cursor's thermo-nuclear code quality review, Ponytail's "write 
 
 For each new function, file, type, or dependency, ask in order. Stop at the first yes.
 
-1. Does it need to exist at all?
+1. Could it be dropped with no loss?
 2. Does this repo already have it? (`src/` helpers, types, parsers)
 3. Does Node's standard library have it?
 4. Does an installed dependency have it?
 5. Can it be one or two lines inline?
 
-Only then is new code justified. A yes that was skipped is a blocker.
+Only then is new code justified. If an earlier question is a yes and the diff adds new code anyway, that is a blocker.
 
 ## Lens 2: Structure (thermo-nuclear)
 

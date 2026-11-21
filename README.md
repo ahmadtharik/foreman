@@ -15,7 +15,7 @@ Status: F0 (setup). Not yet run end to end.
 
 | Path | What |
 |---|---|
-| `.claude/skills/` | The three stage skills. For another target repo, copy them into its `.claude/skills/`. |
+| `.claude/skills/` | The three stage skills (`foreman-*`), plus `quality-review` for work on this repo. For another target repo, copy only the `foreman-*` skills. |
 | `specs/` | Specifications fed to the planner. |
 | `src/board/labels.ts` | Status and claim labels. Create them with `npm run setup:labels -- owner/name`. |
 | `src/types.ts` | Statuses, results, ticket shape. |
