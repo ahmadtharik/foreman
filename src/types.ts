@@ -56,7 +56,10 @@ export interface Ticket {
   number: number;
   title: string;
   status: Status;
-  body: TicketBody;
+  /** `null` when the body does not match the template; see `parseError`. */
+  body: TicketBody | null;
+  /** The parser's message when `body` is `null`. */
+  parseError?: string;
   rawBody: string;
   round: number;
   claim?: Claim;
