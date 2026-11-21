@@ -39,6 +39,7 @@ npm run check:claude   # confirms a non-interactive run works on the plan
 
 - Work on a short branch (`f1-planner`, `fix-result-parser`), never directly on `main`.
 - Run `npm run check` before pushing.
+- Run the quality loop: a fresh reviewer runs the `quality-review` skill, blockers get fixed, repeat until clean (max 3 rounds). See `CLAUDE.md`.
 - Open a pull request. CI (`.github/workflows/ci.yml`) runs the type check and unit tests.
 - Squash-merge when CI is green. `main` is protected and requires the `check` job.
 - CI never runs Claude. Agent runs stay on the local machine, on the Claude plan.
