@@ -6,7 +6,7 @@ Every change goes through this loop before Ahmad merges it. Run steps 1 to 4 on 
 
 1. Work on a branch, never on `main`.
 2. Run `npm run check` until it passes.
-3. **Quality loop.** Start a subagent with fresh context and have it run the `quality-review` skill on the branch. Fresh context matters: the author should not grade its own work.
+3. **Quality loop.** Start a subagent with fresh context and have it run the `quality-review` skill on the branch. Fresh context matters: the author should not grade its own work. Commit first, because the reviewer only sees committed work. Tell the reviewer the round number.
    - Blockers: fix every one, commit, and run a new review round.
    - Stop when the report says `QUALITY: clean`.
    - Cap: 3 rounds. If blockers remain, stop and show Ahmad the last report.
