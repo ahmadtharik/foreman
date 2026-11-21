@@ -62,3 +62,5 @@ Changes made with Claude go through a review loop before the PR: a fresh subagen
 The skill borrows ideas, in its own words, from Cursor's thermo-nuclear code quality review (structural blockers, "code judo"), Ponytail (should this code exist at all) and pstack (fix root causes, remove filler). Only blockers send code back, so the loop cannot churn on taste.
 
 Foreman's stage agents do not use it yet, so spec results stay comparable. Adding it as a stage is a candidate for after spec 001.
+
+Stop rules keep it from eating plan usage: 3 rounds at most (1 for docs or small diffs), stop when blockers stop dropping or a fixed blocker comes back, stop at a usage warning. Follow-up rounds only check the previous blockers and the new fixes, so the reviewer cannot keep finding fresh issues. The reviewer runs on Sonnet.
