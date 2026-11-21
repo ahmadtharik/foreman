@@ -54,3 +54,11 @@ That is where Claude Code finds project skills. Foreman is its own first target,
 ## 2026-11-17: The planner creates issues through a script
 
 `npm run create-tickets` reads an approved plan file, checks every ticket against the template first, and creates nothing if one fails. Tickets refer to earlier tickets as `#T1` until real issue numbers exist. Plans are committed under `plans/` so edits made at approval can be counted later.
+
+## 2026-11-21: Quality loop before every pull request
+
+Changes made with Claude go through a review loop before the PR: a fresh subagent runs the `quality-review` skill, blockers get fixed, and it repeats until clean, at most 3 rounds. The author does not grade its own work, the same rule Foreman applies to its builder and reviewer.
+
+The skill borrows ideas, in its own words, from Cursor's thermo-nuclear code quality review (structural blockers, "code judo"), Ponytail (should this code exist at all) and pstack (fix root causes, remove filler). Only blockers send code back, so the loop cannot churn on taste.
+
+Foreman's stage agents do not use it yet, so spec results stay comparable. Adding it as a stage is a candidate for after spec 001.
