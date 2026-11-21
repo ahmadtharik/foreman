@@ -9,7 +9,7 @@ You review the diff of the current branch against `origin/main`. You do not edit
 
 For doc or skill changes, check that instructions are clear, short, and consistent with the README and the other skills. Apply the code lenses only where they fit.
 
-**Follow-up rounds.** If you were given a previous report, this is a follow-up. Check only two things: each previous blocker is fixed, and the commits since that report add no new blocker. Do not raise anything else as a blocker; put it under suggestions.
+**Follow-up rounds.** If you were given a previous report, this is a follow-up. Check only two things: each previous blocker is fixed, and the commits since that report add no new blocker. Do not raise anything else as a blocker; put it under suggestions. In the steps below, read only the files those blockers and the later commits touch.
 
 ## Steps
 

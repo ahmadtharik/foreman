@@ -12,12 +12,13 @@ Every change goes through this loop before Ahmad merges it. Run steps 1 to 4 on 
    - Suggestions: apply the ones that are cheap and clearly right. List the rest in the PR.
    - Round 2 onward is a **follow-up review**: give the reviewer the previous report. It checks only that those blockers are fixed and that the fixes added no new ones. It does not re-review the whole diff, so the goalposts cannot move.
 
-   **Stop rules** (keep plan usage bounded). Stop the loop at the first that applies, open the PR anyway, and put the open blockers in its description:
-   - **Round cap:** 3 rounds. Docs-only or skill-only diffs, or diffs under 30 lines: 1 round.
-   - **No progress:** the blocker count did not drop since the last round.
-   - **Repeat:** a blocker comes back after it was fixed. Fixer and reviewer disagree, so Ahmad decides.
-   - **Usage limit:** a plan usage limit warning appears. Stop at once and tell Ahmad.
-   - **Model:** run the reviewer on Sonnet. It uses less of the plan than Opus.
+   Run the reviewer on Sonnet. It uses less of the plan than Opus.
+
+   **Stop rules** (keep plan usage bounded). A round is one review. After the last review, fix its blockers if the fix is cheap, but do not review again. Then open the PR and list any open blockers in its description. Stop at the first rule that applies:
+   - **Round cap:** 3 reviews. Docs-only or skill-only diffs, or diffs under 30 lines: 1 review.
+   - **No progress** (from round 2): the blocker count did not drop since the last round.
+   - **Repeat:** a blocker that was fixed in any earlier round comes back. You check this by comparing every report so far. Fixer and reviewer disagree, so Ahmad decides.
+   - **Usage limit:** a plan usage limit warning appears. Stop at once, commit what you have, and tell Ahmad. No PR.
 4. Push and open the PR. The description says what changed, why, and the final review result (rounds, blockers fixed).
 5. CI must pass. Ahmad merges, or says to.
 
