@@ -11,7 +11,8 @@
     "check": "npm run typecheck && npm test",
     "check:claude": "node src/scripts/check-claude.ts",
     "setup:labels": "node src/scripts/setup-labels.ts",
-    "create-tickets": "node src/scripts/create-tickets.ts"
+    "create-tickets": "node src/scripts/create-tickets.ts",
+    "smoke:board": "node src/scripts/smoke-board.ts"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
