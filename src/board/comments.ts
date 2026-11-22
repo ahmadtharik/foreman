@@ -6,7 +6,7 @@ import { STATUSES, type Claim, type StageName, type Status } from "../types.ts";
  * the round from comments alone.
  */
 export type BoardEvent =
-  | { kind: "move"; from: Status; to: Status; reason: string }
+  | { kind: "move"; from: Status | null; to: Status; reason: string }
   | { kind: "claim"; by: string; stage: StageName; at: Date }
   | { kind: "release"; reason: string }
   | { kind: "round"; round: number };
@@ -20,8 +20,10 @@ function marker(data: Record<string, unknown>): string {
   return `<!-- foreman ${json} -->`;
 }
 
-export function formatMove(from: Status, to: Status, reason: string): string {
-  return `Moved from ${from} to ${to}: ${reason}\n${marker({ kind: "move", from, to, reason })}`;
+/** `from` is `null` when the ticket had no single status label before the move. */
+export function formatMove(from: Status | null, to: Status, reason: string): string {
+  const sentence = from === null ? `Moved to ${to}` : `Moved from ${from} to ${to}`;
+  return `${sentence}: ${reason}\n${marker({ kind: "move", from, to, reason })}`;
 }
 
 export function formatClaim(claim: Claim): string {
@@ -61,7 +63,7 @@ export function parseComment(body: string): BoardEvent | undefined {
 
   switch (d.kind) {
     case "move":
-      if (isStatus(d.from) && isStatus(d.to) && isString(d.reason)) {
+      if ((d.from === null || isStatus(d.from)) && isStatus(d.to) && isString(d.reason)) {
         return { kind: "move", from: d.from, to: d.to, reason: d.reason };
       }
       return undefined;
