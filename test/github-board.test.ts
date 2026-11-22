@@ -209,12 +209,6 @@ test("a non-2xx response rejects with the status code and never the token", asyn
   await assert.rejects(board(fn, token).list(), (e: Error) => e.message.includes("404") && !e.message.includes(token));
 });
 
-test("claim and release are still stubs", async () => {
-  const { fn } = fakeFetch({});
-  await assert.rejects(board(fn).claim(1, "build", "x"), /not implemented/);
-  await assert.rejects(board(fn).release(1, "x"), /not implemented/);
-});
-
 // Write methods use the repo from the ticket's test cases.
 const WREPO = "o/r";
 const WAPI = `https://api.github.com/repos/${WREPO}`;
@@ -343,4 +337,93 @@ test("a failed write names the method and never the token", async () => {
     wboard(fn).comment(3, "x"),
     (e: Error) => /POST .*422/.test(e.message) && !e.message.includes("t0ken"),
   );
+});
+
+// claim and release, with the clock fixed by the `now` option.
+const NOW = new Date("2026-11-18T12:00:00Z");
+const cboard = (f: typeof fetch) =>
+  new GitHubBoard({ repo: WREPO, token: "t0ken", claimTimeoutMin: 60, fetch: f, now: () => NOW });
+
+/** Routes for issue 4 whose comments listing returns whatever has been posted so far. */
+function liveComments(initial: string[], extra: Record<string, Route> = {}) {
+  const posted = [...initial];
+  const routes: Record<string, Route> = {
+    [`${WAPI}/issues/4`]: { body: issue({ number: 4, labels: ["status: in progress"] }) },
+    [`${WAPI}/issues/4/comments?per_page=100`]: { body: posted.map((body) => ({ body })) },
+    [`POST ${WAPI}/issues/4/labels`]: { body: [] },
+    [`POST ${WAPI}/issues/4/comments`]: { status: 201, body: {} },
+    ...extra,
+  };
+  const { fn: inner, calls } = fakeFetch(routes);
+  const fn = (async (input: string | URL | Request, init?: RequestInit) => {
+    if (init?.method === "POST" && String(input).endsWith("/comments")) {
+      posted.push(JSON.parse(String(init.body)).body);
+      routes[`${WAPI}/issues/4/comments?per_page=100`] = { body: posted.map((body) => ({ body })) };
+    }
+    return inner(input, init);
+  }) as typeof fetch;
+  return { fn, calls };
+}
+
+test("claim on an unclaimed ticket adds the claim label, posts a claim comment, and returns now", async () => {
+  const { fn, calls } = liveComments([]);
+  const c = await cboard(fn).claim(4, "build", "runner-1");
+  assert.deepEqual(c, { by: "runner-1", stage: "build", at: new Date("2026-11-18T12:00:00.000Z") });
+  assert.equal(c.at.toISOString(), "2026-11-18T12:00:00.000Z");
+  const w = writes(calls);
+  assert.deepEqual(
+    w.map((x) => `${x.method} ${x.url}`),
+    [`POST ${WAPI}/issues/4/labels`, `POST ${WAPI}/issues/4/comments`],
+  );
+  assert.deepEqual(w[0]!.body, { labels: ["foreman: claimed"] });
+  assert.deepEqual(parseComment(w[1]!.body.body), { kind: "claim", by: "runner-1", stage: "build", at: NOW });
+});
+
+test("claim on a ticket with a fresh claim rejects and sends no write", async () => {
+  const at = new Date("2026-11-18T11:30:00Z");
+  const { fn, calls } = liveComments([formatClaim({ by: "runner-1", stage: "build", at })]);
+  await assert.rejects(cboard(fn).claim(4, "build", "runner-2"), /already claimed by runner-1 for build/);
+  assert.equal(calls.filter((c) => ["POST", "PATCH", "DELETE"].includes(c.method)).length, 0);
+});
+
+test("claim on a ticket with a stale claim succeeds and replaces it", async () => {
+  const at = new Date("2026-11-18T10:59:00Z");
+  const { fn } = liveComments([formatClaim({ by: "runner-1", stage: "build", at })]);
+  const b = cboard(fn);
+  const c = await b.claim(4, "build", "runner-2");
+  assert.equal(c.by, "runner-2");
+  const t = await b.get(4);
+  assert.equal(t.claim?.by, "runner-2");
+  assert.equal(t.claim?.at.getTime(), NOW.getTime());
+});
+
+test("a claim exactly claimTimeoutMin old is stale", async () => {
+  const at = new Date("2026-11-18T11:00:00Z");
+  const { fn } = liveComments([formatClaim({ by: "runner-1", stage: "review", at })]);
+  assert.equal((await cboard(fn).claim(4, "build", "runner-2")).by, "runner-2");
+});
+
+test("release tolerates a 404 on the label, posts the reason, and get then has no claim", async () => {
+  const at = new Date("2026-11-18T11:30:00Z");
+  const { fn, calls } = liveComments([formatClaim({ by: "runner-1", stage: "build", at })], {
+    [`DELETE ${WAPI}/issues/4/labels/foreman%3A%20claimed`]: { status: 404, body: { message: "Label does not exist" } },
+  });
+  const b = cboard(fn);
+  await b.release(4, "agent timed out");
+  const w = writes(calls);
+  assert.deepEqual(
+    w.map((x) => `${x.method} ${x.url}`),
+    [`DELETE ${WAPI}/issues/4/labels/foreman%3A%20claimed`, `POST ${WAPI}/issues/4/comments`],
+  );
+  assert.match(w[1]!.body.body, /agent timed out/);
+  assert.deepEqual(parseComment(w[1]!.body.body), { kind: "release", reason: "agent timed out" });
+  assert.equal((await b.get(4)).claim, undefined);
+});
+
+test("release still rejects on a non-404 failure removing the label", async () => {
+  const { fn, calls } = liveComments([], {
+    [`DELETE ${WAPI}/issues/4/labels/foreman%3A%20claimed`]: { status: 500, body: {} },
+  });
+  await assert.rejects(cboard(fn).release(4, "x"), /DELETE .*500/);
+  assert.equal(calls.filter((c) => c.method === "POST").length, 0);
 });

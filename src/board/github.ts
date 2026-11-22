@@ -1,7 +1,7 @@
 import type { Claim, StageName, Status, Ticket } from "../types.ts";
 import { parseTicket } from "../ticket.ts";
-import { boardState, formatMove, formatRound } from "./comments.ts";
-import { STATUS_LABELS, statusFromLabels } from "./labels.ts";
+import { boardState, formatClaim, formatMove, formatRelease, formatRound } from "./comments.ts";
+import { CLAIM_LABEL, STATUS_LABELS, statusFromLabels } from "./labels.ts";
 import type { BoardAdapter } from "./types.ts";
 
 export interface GitHubBoardOptions {
@@ -10,6 +10,8 @@ export interface GitHubBoardOptions {
   token: string;
   claimTimeoutMin: number;
   fetch?: typeof fetch;
+  /** Clock for claim times and staleness; defaults to the system clock. */
+  now?: () => Date;
 }
 
 interface Issue {
@@ -57,15 +59,18 @@ export class GitHubBoard implements BoardAdapter {
   readonly claimTimeoutMin: number;
   readonly #token: string;
   readonly #fetch: typeof fetch;
+  readonly #now: () => Date;
 
   constructor(opts: GitHubBoardOptions) {
     this.repo = opts.repo;
     this.claimTimeoutMin = opts.claimTimeoutMin;
     this.#token = opts.token;
     this.#fetch = opts.fetch ?? globalThis.fetch;
+    this.#now = opts.now ?? (() => new Date());
   }
 
-  async #request(url: string, method = "GET", body?: unknown): Promise<Response> {
+  /** Rejects on a non-2xx status, except one listed in `allow`. */
+  async #request(url: string, method = "GET", body?: unknown, allow: number[] = []): Promise<Response> {
     const headers: Record<string, string> = {
       Authorization: `Bearer ${this.#token}`,
       Accept: "application/vnd.github+json",
@@ -78,7 +83,7 @@ export class GitHubBoard implements BoardAdapter {
       init.body = JSON.stringify(body);
     }
     const res = await this.#fetch(url, init);
-    if (!res.ok) {
+    if (!res.ok && !allow.includes(res.status)) {
       const path = url.startsWith(API) ? url.slice(API.length) : url;
       const text = (await res.text().catch(() => "")).slice(0, 200);
       const msg = `GitHub ${method} ${path} failed: ${res.status} ${res.statusText} ${text}`.trim();
@@ -99,11 +104,13 @@ export class GitHubBoard implements BoardAdapter {
     return out;
   }
 
+  async #state(number: number): Promise<{ round: number; claim?: Claim }> {
+    const comments = await this.#all<Comment>(`${API}/repos/${this.repo}/issues/${number}/comments?per_page=100`);
+    return boardState(comments.map((c) => c.body ?? ""));
+  }
+
   async #toTicket(issue: Issue, status: Status): Promise<Ticket> {
-    const comments = await this.#all<Comment>(
-      `${API}/repos/${this.repo}/issues/${issue.number}/comments?per_page=100`,
-    );
-    const { round, claim } = boardState(comments.map((c) => c.body ?? ""));
+    const { round, claim } = await this.#state(issue.number);
     const ticket = withBody(issue, status, round);
     if (claim) ticket.claim = claim;
     return ticket;
@@ -144,12 +151,26 @@ export class GitHubBoard implements BoardAdapter {
     return withBody(issue, input.status, 1);
   }
 
-  async claim(_number: number, _stage: StageName, _by: string): Promise<Claim> {
-    throw new Error("not implemented");
+  /** Check-then-write: fails while a claim younger than `claimTimeoutMin` exists; a stale one is replaced. */
+  async claim(number: number, stage: StageName, by: string): Promise<Claim> {
+    const now = this.#now();
+    const { claim: current } = await this.#state(number);
+    if (current && now.getTime() - current.at.getTime() < this.claimTimeoutMin * 60_000) {
+      throw new Error(
+        `#${number} is already claimed by ${current.by} for ${current.stage} since ${current.at.toISOString()}`,
+      );
+    }
+    const claim: Claim = { by, stage, at: now };
+    await this.#request(`${API}/repos/${this.repo}/issues/${number}/labels`, "POST", { labels: [CLAIM_LABEL.name] });
+    await this.#postComment(number, formatClaim(claim));
+    return claim;
   }
 
-  async release(_number: number, _reason: string): Promise<void> {
-    throw new Error("not implemented");
+  /** A 404 on removing the label (already gone) is not an error. */
+  async release(number: number, reason: string): Promise<void> {
+    const url = `${API}/repos/${this.repo}/issues/${number}/labels/${encodeURIComponent(CLAIM_LABEL.name)}`;
+    await this.#request(url, "DELETE", undefined, [404]);
+    await this.#postComment(number, formatRelease(reason));
   }
 
   /** Removes every status label present (so it also recovers a ticket with none or two), keeps other labels. */
