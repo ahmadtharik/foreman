@@ -1,7 +1,7 @@
 import type { Claim, StageName, Status, Ticket } from "../types.ts";
 import { parseTicket } from "../ticket.ts";
-import { boardState } from "./comments.ts";
-import { statusFromLabels } from "./labels.ts";
+import { boardState, formatMove, formatRound } from "./comments.ts";
+import { STATUS_LABELS, statusFromLabels } from "./labels.ts";
 import type { BoardAdapter } from "./types.ts";
 
 export interface GitHubBoardOptions {
@@ -39,6 +39,18 @@ function nextLink(link: string | null): string | undefined {
 const labelNames = (issue: Issue): string[] =>
   issue.labels.map((l) => (typeof l === "string" ? l : (l.name ?? "")));
 
+/** A Ticket from an issue, with the body parsed or flagged as unparseable. */
+function withBody(issue: Issue, status: Status, round: number): Ticket {
+  const rawBody = issue.body ?? "";
+  const ticket: Ticket = { number: issue.number, title: issue.title, status, body: null, rawBody, round };
+  try {
+    ticket.body = parseTicket(rawBody);
+  } catch (e) {
+    ticket.parseError = (e as Error).message;
+  }
+  return ticket;
+}
+
 /** GitHub Issues as the board. Status is a label; round and claim come from comments. */
 export class GitHubBoard implements BoardAdapter {
   readonly repo: string;
@@ -53,19 +65,23 @@ export class GitHubBoard implements BoardAdapter {
     this.#fetch = opts.fetch ?? globalThis.fetch;
   }
 
-  async #request(url: string): Promise<Response> {
-    const res = await this.#fetch(url, {
-      headers: {
-        Authorization: `Bearer ${this.#token}`,
-        Accept: "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-        "User-Agent": "foreman",
-      },
-    });
+  async #request(url: string, method = "GET", body?: unknown): Promise<Response> {
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${this.#token}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      "User-Agent": "foreman",
+    };
+    const init: RequestInit = { method, headers };
+    if (body !== undefined) {
+      headers["Content-Type"] = "application/json";
+      init.body = JSON.stringify(body);
+    }
+    const res = await this.#fetch(url, init);
     if (!res.ok) {
       const path = url.startsWith(API) ? url.slice(API.length) : url;
       const text = (await res.text().catch(() => "")).slice(0, 200);
-      const msg = `GitHub GET ${path} failed: ${res.status} ${res.statusText} ${text}`.trim();
+      const msg = `GitHub ${method} ${path} failed: ${res.status} ${res.statusText} ${text}`.trim();
       throw new Error(this.#token ? msg.split(this.#token).join("***") : msg);
     }
     return res;
@@ -88,15 +104,13 @@ export class GitHubBoard implements BoardAdapter {
       `${API}/repos/${this.repo}/issues/${issue.number}/comments?per_page=100`,
     );
     const { round, claim } = boardState(comments.map((c) => c.body ?? ""));
-    const rawBody = issue.body ?? "";
-    const ticket: Ticket = { number: issue.number, title: issue.title, status, body: null, rawBody, round };
+    const ticket = withBody(issue, status, round);
     if (claim) ticket.claim = claim;
-    try {
-      ticket.body = parseTicket(rawBody);
-    } catch (e) {
-      ticket.parseError = (e as Error).message;
-    }
     return ticket;
+  }
+
+  async #postComment(number: number, body: string): Promise<void> {
+    await this.#request(`${API}/repos/${this.repo}/issues/${number}/comments`, "POST", { body });
   }
 
   async get(number: number): Promise<Ticket> {
@@ -120,8 +134,14 @@ export class GitHubBoard implements BoardAdapter {
     return tickets;
   }
 
-  async create(_input: { title: string; body: string; status: Status }): Promise<Ticket> {
-    throw new Error("not implemented");
+  async create(input: { title: string; body: string; status: Status }): Promise<Ticket> {
+    const res = await this.#request(`${API}/repos/${this.repo}/issues`, "POST", {
+      title: input.title,
+      body: input.body,
+      labels: [STATUS_LABELS[input.status].name],
+    });
+    const issue = (await res.json()) as Issue;
+    return withBody(issue, input.status, 1);
   }
 
   async claim(_number: number, _stage: StageName, _by: string): Promise<Claim> {
@@ -132,15 +152,28 @@ export class GitHubBoard implements BoardAdapter {
     throw new Error("not implemented");
   }
 
-  async move(_number: number, _to: Status, _reason: string): Promise<void> {
-    throw new Error("not implemented");
+  /** Removes every status label present (so it also recovers a ticket with none or two), keeps other labels. */
+  async move(number: number, to: Status, reason: string): Promise<void> {
+    const issueUrl = `${API}/repos/${this.repo}/issues/${number}`;
+    const issue = (await (await this.#request(issueUrl)).json()) as Issue;
+    const labels = labelNames(issue);
+    const from = statusFromLabels(labels) ?? null;
+    const statusNames = new Set(Object.values(STATUS_LABELS).map((l) => l.name));
+    for (const name of labels.filter((l) => statusNames.has(l))) {
+      await this.#request(`${issueUrl}/labels/${encodeURIComponent(name)}`, "DELETE");
+    }
+    await this.#request(`${issueUrl}/labels`, "POST", { labels: [STATUS_LABELS[to].name] });
+    await this.#postComment(number, formatMove(from, to, reason));
   }
 
-  async setRound(_number: number, _round: number): Promise<void> {
-    throw new Error("not implemented");
+  async setRound(number: number, round: number): Promise<void> {
+    if (!Number.isInteger(round) || round < 1) {
+      throw new Error(`round must be a positive whole number, got ${round}`);
+    }
+    await this.#postComment(number, formatRound(round));
   }
 
-  async comment(_number: number, _body: string): Promise<void> {
-    throw new Error("not implemented");
+  async comment(number: number, body: string): Promise<void> {
+    await this.#postComment(number, body);
   }
 }

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { GitHubBoard } from "../src/board/github.ts";
-import { formatClaim, formatRound } from "../src/board/comments.ts";
+import { formatClaim, formatRound, parseComment } from "../src/board/comments.ts";
 
 const REPO = "acme/widgets";
 const API = `https://api.github.com/repos/${REPO}`;
@@ -41,13 +41,26 @@ interface FakeIssue {
 
 type Route = { status?: number; body: unknown; link?: string };
 
-/** A fake fetch over a URL -> response map. Records each request. */
+interface Call {
+  method: string;
+  url: string;
+  headers: Record<string, string>;
+  body?: any; // parsed JSON request body
+}
+
+/**
+ * A fake fetch over a route map. Keys are "METHOD url", or a bare url for GET.
+ * Records each request with its method and parsed JSON body.
+ */
 function fakeFetch(routes: Record<string, Route>) {
-  const calls: { url: string; headers: Record<string, string> }[] = [];
+  const calls: Call[] = [];
   const fn = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
-    calls.push({ url, headers: (init?.headers ?? {}) as Record<string, string> });
-    const route = routes[url];
+    const method = init?.method ?? "GET";
+    const call: Call = { method, url, headers: (init?.headers ?? {}) as Record<string, string> };
+    if (typeof init?.body === "string") call.body = JSON.parse(init.body);
+    calls.push(call);
+    const route = routes[`${method} ${url}`] ?? (method === "GET" ? routes[url] : undefined);
     if (!route) return new Response("Not Found", { status: 404, statusText: "Not Found" });
     const headers: Record<string, string> = { "content-type": "application/json" };
     if (route.link) headers.link = route.link;
@@ -196,7 +209,138 @@ test("a non-2xx response rejects with the status code and never the token", asyn
   await assert.rejects(board(fn, token).list(), (e: Error) => e.message.includes("404") && !e.message.includes(token));
 });
 
-test("write methods are stubs", async () => {
+test("claim and release are still stubs", async () => {
   const { fn } = fakeFetch({});
-  await assert.rejects(board(fn).move(1, "QA", "x"), /not implemented/);
+  await assert.rejects(board(fn).claim(1, "build", "x"), /not implemented/);
+  await assert.rejects(board(fn).release(1, "x"), /not implemented/);
+});
+
+// Write methods use the repo from the ticket's test cases.
+const WREPO = "o/r";
+const WAPI = `https://api.github.com/repos/${WREPO}`;
+const wboard = (f: typeof fetch) => new GitHubBoard({ repo: WREPO, token: "t0ken", claimTimeoutMin: 30, fetch: f });
+const writes = <T extends { method: string }>(calls: T[]) => calls.filter((c) => c.method !== "GET");
+
+test("create posts title, body and the single status label, and returns status and round 1", async () => {
+  const { fn, calls } = fakeFetch({
+    [`POST ${WAPI}/issues`]: {
+      status: 201,
+      body: { number: 21, title: "T", body: template, labels: [{ name: "status: backlog" }] },
+    },
+  });
+  const t = await wboard(fn).create({ title: "T", body: template, status: "Backlog" });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.method, "POST");
+  assert.equal(calls[0]!.url, `${WAPI}/issues`);
+  assert.deepEqual(calls[0]!.body, { title: "T", body: template, labels: ["status: backlog"] });
+  assert.equal(calls[0]!.headers["Content-Type"], "application/json");
+  assert.equal(t.number, 21);
+  assert.equal(t.title, "T");
+  assert.equal(t.status, "Backlog");
+  assert.equal(t.round, 1);
+  assert.equal(t.body?.testCases.length, 2);
+});
+
+test("move replaces the status label, keeps other labels, and posts a parseable move comment", async () => {
+  const { fn, calls } = fakeFetch({
+    [`${WAPI}/issues/3`]: { body: issue({ number: 3, labels: ["bug", "status: ready"] }) },
+    [`DELETE ${WAPI}/issues/3/labels/status%3A%20ready`]: { body: [{ name: "bug" }] },
+    [`POST ${WAPI}/issues/3/labels`]: { body: [{ name: "bug" }, { name: "status: qa" }] },
+    [`POST ${WAPI}/issues/3/comments`]: { status: 201, body: {} },
+  });
+  await wboard(fn).move(3, "QA", "built");
+  const w = writes(calls);
+  assert.deepEqual(
+    w.map((c) => `${c.method} ${c.url}`),
+    [
+      `DELETE ${WAPI}/issues/3/labels/status%3A%20ready`,
+      `POST ${WAPI}/issues/3/labels`,
+      `POST ${WAPI}/issues/3/comments`,
+    ],
+  );
+  assert.ok(!calls.some((c) => c.method === "DELETE" && c.url.endsWith("/labels/bug")));
+  assert.deepEqual(w[1]!.body, { labels: ["status: qa"] });
+  assert.deepEqual(parseComment(w[2]!.body.body), { kind: "move", from: "Ready", to: "QA", reason: "built" });
+});
+
+test("move removes both status labels when there are two, and records from as null", async () => {
+  const { fn, calls } = fakeFetch({
+    [`${WAPI}/issues/4`]: { body: issue({ number: 4, labels: ["status: ready", "status: qa"] }) },
+    [`DELETE ${WAPI}/issues/4/labels/status%3A%20ready`]: { body: [] },
+    [`DELETE ${WAPI}/issues/4/labels/status%3A%20qa`]: { body: [] },
+    [`POST ${WAPI}/issues/4/labels`]: { body: [] },
+    [`POST ${WAPI}/issues/4/comments`]: { status: 201, body: {} },
+  });
+  await wboard(fn).move(4, "Needs human", "recovered");
+  const w = writes(calls);
+  assert.equal(w.filter((c) => c.method === "DELETE").length, 2);
+  assert.deepEqual(w[2]!.body, { labels: ["status: needs human"] });
+  assert.deepEqual(parseComment(w[3]!.body.body), {
+    kind: "move",
+    from: null,
+    to: "Needs human",
+    reason: "recovered",
+  });
+});
+
+test("move with no status label deletes nothing and records from as null", async () => {
+  const { fn, calls } = fakeFetch({
+    [`${WAPI}/issues/5`]: { body: issue({ number: 5, labels: ["bug"] }) },
+    [`POST ${WAPI}/issues/5/labels`]: { body: [] },
+    [`POST ${WAPI}/issues/5/comments`]: { status: 201, body: {} },
+  });
+  await wboard(fn).move(5, "Backlog", "first status");
+  const w = writes(calls);
+  assert.deepEqual(
+    w.map((c) => c.method),
+    ["POST", "POST"],
+  );
+  assert.deepEqual(parseComment(w[1]!.body.body), { kind: "move", from: null, to: "Backlog", reason: "first status" });
+});
+
+test("setRound posts a round comment that get reads back", async () => {
+  const routes: Record<string, Route> = {
+    [`${WAPI}/issues/3`]: { body: issue({ number: 3, labels: ["status: in progress"] }) },
+    [`${WAPI}/issues/3/comments?per_page=100`]: { body: [] },
+    [`POST ${WAPI}/issues/3/comments`]: { status: 201, body: {} },
+  };
+  const { fn: inner, calls } = fakeFetch(routes);
+  // The comments listing returns whatever has been posted so far.
+  const posted: string[] = [];
+  const fn = (async (input: string | URL | Request, init?: RequestInit) => {
+    if (init?.method === "POST" && String(input).endsWith("/comments")) {
+      posted.push(JSON.parse(String(init.body)).body);
+      routes[`${WAPI}/issues/3/comments?per_page=100`] = { body: posted.map((body) => ({ body })) };
+    }
+    return inner(input, init);
+  }) as typeof fetch;
+  const b = wboard(fn);
+  await b.setRound(3, 2);
+  assert.equal(writes(calls).length, 1);
+  assert.equal((await b.get(3)).round, 2);
+});
+
+test("setRound rejects a round that is not a positive whole number and sends nothing", async () => {
+  const { fn, calls } = fakeFetch({});
+  await assert.rejects(wboard(fn).setRound(3, 0), /positive whole number/);
+  await assert.rejects(wboard(fn).setRound(3, 1.5), /positive whole number/);
+  await assert.rejects(wboard(fn).setRound(3, -1), /positive whole number/);
+  assert.equal(calls.length, 0);
+});
+
+test("comment posts the body unchanged", async () => {
+  const { fn, calls } = fakeFetch({ [`POST ${WAPI}/issues/3/comments`]: { status: 201, body: {} } });
+  await wboard(fn).comment(3, "hello **world**");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.method, "POST");
+  assert.equal(calls[0]!.url, `${WAPI}/issues/3/comments`);
+  assert.deepEqual(calls[0]!.body, { body: "hello **world**" });
+});
+
+test("a failed write names the method and never the token", async () => {
+  const fn = (async () => new Response("t0ken", { status: 422, statusText: "Unprocessable" })) as typeof fetch;
+  await assert.rejects(
+    wboard(fn).comment(3, "x"),
+    (e: Error) => /POST .*422/.test(e.message) && !e.message.includes("t0ken"),
+  );
 });
