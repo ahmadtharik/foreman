@@ -4,8 +4,10 @@ import {
   boardState,
   formatClaim,
   formatMove,
+  formatPassed,
   formatRelease,
   formatRound,
+  formatRunFailed,
   parseComment,
 } from "../src/board/comments.ts";
 import type { Claim } from "../src/types.ts";
@@ -51,8 +53,8 @@ test("parses the example marker from the ticket", () => {
 });
 
 test("no Foreman comments gives round 1 and no claim", () => {
-  assert.deepEqual(boardState(["plain text"]), { round: 1, claim: undefined });
-  assert.deepEqual(boardState([]), { round: 1, claim: undefined });
+  assert.deepEqual(boardState(["plain text"]), { round: 1, claim: undefined, failedRuns: 0 });
+  assert.deepEqual(boardState([]), { round: 1, claim: undefined, failedRuns: 0 });
 });
 
 test("latest round wins", () => {
@@ -94,4 +96,42 @@ test("plain and malformed comments return undefined without throwing", () => {
     assert.doesNotThrow(() => parseComment(body));
     assert.equal(parseComment(body), undefined, body);
   }
+});
+
+test("run-failed and passed round-trip", () => {
+  assert.deepEqual(parseComment(formatRunFailed("no block")), { kind: "run-failed", reason: "no block" });
+  assert.deepEqual(parseComment(formatPassed("abc123")), { kind: "passed", sha: "abc123" });
+  assert.match(formatPassed("abc123"), /^Review passed on abc123; waiting to merge\./);
+  assert.match(formatRunFailed("no block"), /^Run failed: no block/);
+});
+
+test("a passed marker with an empty or non-string sha, or a run-failed with an empty reason, is ignored", () => {
+  assert.equal(parseComment(formatPassed("")), undefined);
+  assert.equal(parseComment('<!-- foreman {"kind":"passed","sha":5} -->'), undefined);
+  assert.equal(parseComment(formatRunFailed("")), undefined);
+  assert.equal(parseComment('<!-- foreman {"kind":"run-failed"} -->'), undefined);
+});
+
+test("failedRuns counts only run-failed events after the latest move", () => {
+  const bodies = [formatRunFailed("a"), formatMove("QA", "QA", "x"), formatRunFailed("b"), formatRunFailed("c")];
+  assert.equal(boardState(bodies).failedRuns, 2);
+  assert.equal(boardState([formatRunFailed("a")]).failedRuns, 1);
+  assert.equal(boardState([]).failedRuns, 0);
+});
+
+test("passedSha is the latest passed event, cleared by a later move", () => {
+  assert.equal(boardState([formatPassed("abc")]).passedSha, "abc");
+  assert.equal(boardState([formatPassed("abc"), formatPassed("def")]).passedSha, "def");
+  assert.equal(boardState([formatPassed("abc"), formatMove("QA", "Done", "merged")]).passedSha, undefined);
+  assert.equal(boardState([formatMove("Ready", "QA", "x"), formatPassed("abc")]).passedSha, "abc");
+});
+
+test("pausedFrom is set while the latest move went to Paused from a known status", () => {
+  assert.equal(boardState([formatMove("QA", "Paused", "limit")]).pausedFrom, "QA");
+  assert.equal(
+    boardState([formatMove("QA", "Paused", "limit"), formatMove("Paused", "QA", "resumed")]).pausedFrom,
+    undefined,
+  );
+  assert.equal(boardState([formatMove(null, "Paused", "limit")]).pausedFrom, undefined);
+  assert.equal(boardState([formatMove("Ready", "QA", "x")]).pausedFrom, undefined);
 });
