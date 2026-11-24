@@ -63,6 +63,12 @@ export interface Ticket {
   rawBody: string;
   round: number;
   claim?: Claim;
+  /** Runs since the latest move that produced no valid result. */
+  failedRuns: number;
+  /** The commit a passing review tested, until the ticket moves again. */
+  passedSha?: string;
+  /** The status a Paused ticket came from. */
+  pausedFrom?: Status;
 }
 
 export interface Claim {

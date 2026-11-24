@@ -1,6 +1,15 @@
 import type { Claim, StageName, Status, Ticket } from "../types.ts";
 import { parseTicket } from "../ticket.ts";
-import { boardState, formatClaim, formatMove, formatRelease, formatRound } from "./comments.ts";
+import {
+  boardState,
+  formatClaim,
+  formatMove,
+  formatPassed,
+  formatRelease,
+  formatRound,
+  formatRunFailed,
+  type BoardState,
+} from "./comments.ts";
 import { CLAIM_LABEL, STATUS_LABELS, statusFromLabels } from "./labels.ts";
 import type { BoardAdapter } from "./types.ts";
 
@@ -44,7 +53,7 @@ const labelNames = (issue: Issue): string[] =>
 /** A Ticket from an issue, with the body parsed or flagged as unparseable. */
 function withBody(issue: Issue, status: Status, round: number): Ticket {
   const rawBody = issue.body ?? "";
-  const ticket: Ticket = { number: issue.number, title: issue.title, status, body: null, rawBody, round };
+  const ticket: Ticket = { number: issue.number, title: issue.title, status, body: null, rawBody, round, failedRuns: 0 };
   try {
     ticket.body = parseTicket(rawBody);
   } catch (e) {
@@ -104,15 +113,17 @@ export class GitHubBoard implements BoardAdapter {
     return out;
   }
 
-  async #state(number: number): Promise<{ round: number; claim?: Claim }> {
-    const comments = await this.#all<Comment>(`${API}/repos/${this.repo}/issues/${number}/comments?per_page=100`);
-    return boardState(comments.map((c) => c.body ?? ""));
+  async #state(number: number): Promise<BoardState> {
+    return boardState(await this.comments(number));
   }
 
   async #toTicket(issue: Issue, status: Status): Promise<Ticket> {
-    const { round, claim } = await this.#state(issue.number);
+    const { round, claim, failedRuns, passedSha, pausedFrom } = await this.#state(issue.number);
     const ticket = withBody(issue, status, round);
+    ticket.failedRuns = failedRuns;
     if (claim) ticket.claim = claim;
+    if (passedSha !== undefined) ticket.passedSha = passedSha;
+    if (pausedFrom !== undefined) ticket.pausedFrom = pausedFrom;
     return ticket;
   }
 
@@ -196,5 +207,19 @@ export class GitHubBoard implements BoardAdapter {
 
   async comment(number: number, body: string): Promise<void> {
     await this.#postComment(number, body);
+  }
+
+  async recordRunFailed(number: number, reason: string): Promise<void> {
+    await this.#postComment(number, formatRunFailed(reason));
+  }
+
+  async recordPassed(number: number, sha: string): Promise<void> {
+    await this.#postComment(number, formatPassed(sha));
+  }
+
+  /** Every comment body across `Link` pages, oldest first. */
+  async comments(number: number): Promise<string[]> {
+    const comments = await this.#all<Comment>(`${API}/repos/${this.repo}/issues/${number}/comments?per_page=100`);
+    return comments.map((c) => c.body ?? "");
   }
 }

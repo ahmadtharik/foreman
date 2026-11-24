@@ -9,7 +9,9 @@ export type BoardEvent =
   | { kind: "move"; from: Status | null; to: Status; reason: string }
   | { kind: "claim"; by: string; stage: StageName; at: Date }
   | { kind: "release"; reason: string }
-  | { kind: "round"; round: number };
+  | { kind: "round"; round: number }
+  | { kind: "run-failed"; reason: string }
+  | { kind: "passed"; sha: string };
 
 const STAGES: readonly StageName[] = ["build", "review"];
 const MARKER = /<!-- foreman (.*?) -->/gs;
@@ -40,6 +42,16 @@ export function formatRelease(reason: string): string {
 
 export function formatRound(n: number): string {
   return `Round ${n}.\n${marker({ kind: "round", round: n })}`;
+}
+
+/** A run that produced no valid result. */
+export function formatRunFailed(reason: string): string {
+  return `Run failed: ${reason}\n${marker({ kind: "run-failed", reason })}`;
+}
+
+/** A passed review, with the commit it tested. */
+export function formatPassed(sha: string): string {
+  return `Review passed on ${sha}; waiting to merge.\n${marker({ kind: "passed", sha })}`;
 }
 
 const isString = (v: unknown): v is string => typeof v === "string";
@@ -79,20 +91,48 @@ export function parseComment(body: string): BoardEvent | undefined {
       return Number.isInteger(d.round) && (d.round as number) >= 1
         ? { kind: "round", round: d.round as number }
         : undefined;
+    case "run-failed":
+      return isString(d.reason) && d.reason !== "" ? { kind: "run-failed", reason: d.reason } : undefined;
+    case "passed":
+      return isString(d.sha) && d.sha !== "" ? { kind: "passed", sha: d.sha } : undefined;
     default:
       return undefined;
   }
 }
 
-/** Rebuild round and claim from comment bodies, oldest first. */
-export function boardState(bodies: string[]): { round: number; claim?: Claim } {
+export interface BoardState {
+  round: number;
+  claim?: Claim;
+  /** Run-failed events since the latest move. */
+  failedRuns: number;
+  /** Sha of the latest passed review since the latest move. */
+  passedSha?: string;
+  /** The status before the latest move, when that move went to Paused from a known status. */
+  pausedFrom?: Status;
+}
+
+/** Rebuild board state from comment bodies, oldest first. */
+export function boardState(bodies: string[]): BoardState {
   let round = 1;
   let claim: Claim | undefined;
+  let failedRuns = 0;
+  let passedSha: string | undefined;
+  let pausedFrom: Status | undefined;
   for (const body of bodies) {
     const event = parseComment(body);
     if (event?.kind === "round") round = event.round;
     else if (event?.kind === "claim") claim = { by: event.by, stage: event.stage, at: event.at };
     else if (event?.kind === "release") claim = undefined;
+    else if (event?.kind === "run-failed") failedRuns++;
+    else if (event?.kind === "passed") passedSha = event.sha;
+    else if (event?.kind === "move") {
+      failedRuns = 0;
+      passedSha = undefined;
+      pausedFrom = event.to === "Paused" && event.from !== null ? event.from : undefined;
+    }
   }
-  return { round, claim };
+  const state: BoardState = { round, claim, failedRuns };
+  if (passedSha !== undefined) state.passedSha = passedSha;
+  if (pausedFrom !== undefined) state.pausedFrom = pausedFrom;
+  return state;
 }

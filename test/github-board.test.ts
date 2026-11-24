@@ -1,7 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { GitHubBoard } from "../src/board/github.ts";
-import { formatClaim, formatRound, parseComment } from "../src/board/comments.ts";
+import {
+  formatClaim,
+  formatMove,
+  formatPassed,
+  formatRound,
+  formatRunFailed,
+  parseComment,
+} from "../src/board/comments.ts";
 
 const REPO = "acme/widgets";
 const API = `https://api.github.com/repos/${REPO}`;
@@ -426,4 +433,75 @@ test("release still rejects on a non-404 failure removing the label", async () =
   });
   await assert.rejects(cboard(fn).release(4, "x"), /DELETE .*500/);
   assert.equal(calls.filter((c) => c.method === "POST").length, 0);
+});
+
+// Failed runs, passed reviews and comments.
+test("get fills failedRuns and passedSha, and comments returns every body across pages, oldest first", async () => {
+  const routes = routesFor([{ number: 5, labels: ["status: qa"] }]);
+  const bodies = [formatRunFailed("a"), formatRunFailed("b"), formatPassed("abc")];
+  const page2 = `${API}/issues/5/comments?per_page=100&page=2`;
+  routes[`${API}/issues/5/comments?per_page=100`] = {
+    body: bodies.slice(0, 2).map((body) => ({ body })),
+    link: `<${page2}>; rel="next", <${page2}>; rel="last"`,
+  };
+  routes[page2] = { body: [{ body: bodies[2] }] };
+  const { fn } = fakeFetch(routes);
+  const b = board(fn);
+  const t = await b.get(5);
+  assert.equal(t.failedRuns, 2);
+  assert.equal(t.passedSha, "abc");
+  assert.equal(t.pausedFrom, undefined);
+  assert.deepEqual(await b.comments(5), bodies);
+});
+
+test("get fills pausedFrom, and a ticket with no events has failedRuns 0", async () => {
+  const { fn } = fakeFetch(
+    routesFor([{ number: 6, labels: ["status: paused"] }, { number: 7, labels: ["status: ready"] }], {
+      6: [formatMove("QA", "Paused", "limit")],
+    }),
+  );
+  const b = board(fn);
+  const t = await b.get(6);
+  assert.equal(t.pausedFrom, "QA");
+  assert.equal(t.failedRuns, 0);
+  assert.equal(t.passedSha, undefined);
+  assert.equal((await b.get(7)).failedRuns, 0);
+});
+
+test("list fills failedRuns, passedSha and pausedFrom", async () => {
+  const routes = listRoutes();
+  routes[`${API}/issues/4/comments?per_page=100`] = {
+    body: [{ body: formatMove("QA", "Paused", "limit") }, { body: formatRunFailed("x") }, { body: formatPassed("def") }],
+  };
+  const { fn } = fakeFetch(routes);
+  const all = await board(fn).list();
+  const t4 = all.find((t) => t.number === 4);
+  assert.equal(t4?.failedRuns, 1);
+  assert.equal(t4?.passedSha, "def");
+  assert.equal(t4?.pausedFrom, "QA");
+  assert.equal(all.find((t) => t.number === 1)?.failedRuns, 0);
+});
+
+test("create returns failedRuns 0", async () => {
+  const { fn } = fakeFetch({
+    [`POST ${API}/issues`]: { status: 201, body: issue({ number: 30, labels: ["status: backlog"] }) },
+  });
+  const t = await board(fn).create({ title: "T", body: template, status: "Backlog" });
+  assert.equal(t.failedRuns, 0);
+  assert.equal(t.passedSha, undefined);
+  assert.equal(t.pausedFrom, undefined);
+});
+
+test("recordRunFailed and recordPassed each post exactly one parseable comment", async () => {
+  const { fn, calls } = fakeFetch({ [`POST ${API}/issues/5/comments`]: { status: 201, body: {} } });
+  const b = board(fn);
+  await b.recordRunFailed(5, "crash");
+  await b.recordPassed(5, "abc");
+  assert.equal(calls.length, 2);
+  assert.deepEqual(
+    calls.map((c) => `${c.method} ${c.url}`),
+    [`POST ${API}/issues/5/comments`, `POST ${API}/issues/5/comments`],
+  );
+  assert.deepEqual(parseComment(calls[0]!.body.body), { kind: "run-failed", reason: "crash" });
+  assert.deepEqual(parseComment(calls[1]!.body.body), { kind: "passed", sha: "abc" });
 });
