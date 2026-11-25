@@ -1,7 +1,10 @@
 import type { AgentAdapter, AgentRunOutcome } from "../agent/types.ts";
+import { parseComment } from "../board/comments.ts";
 import type { BoardAdapter } from "../board/types.ts";
 import type { Settings, StageConfig } from "../config.ts";
+import type { Pulls } from "../github/pulls.ts";
 import type { StageName, Status, Ticket } from "../types.ts";
+import { checkEvidence } from "./evidence.ts";
 import type { Worktrees } from "./worktree.ts";
 
 /** One line per action: the ticket (or null), the action, and why. */
@@ -11,6 +14,7 @@ export interface CycleDeps {
   board: BoardAdapter;
   agents: Record<StageName, AgentAdapter>;
   worktrees: Worktrees;
+  pulls: Pulls;
   settings: Settings;
   runnerId: string;
   now: () => Date;
@@ -26,7 +30,8 @@ export const MAX_FAILED_RUNS = 3;
 
 /**
  * One pass of the runner: resume Paused tickets, promote Backlog tickets,
- * release stale claims, then pick and run at most one ticket per stage.
+ * release stale claims, merge passed tickets, then pick and run at most one
+ * ticket per stage.
  */
 export async function runCycle(deps: CycleDeps): Promise<void> {
   const { settings, dryRun = false } = deps;
@@ -91,7 +96,16 @@ export async function runCycle(deps: CycleDeps): Promise<void> {
     delete t.claim;
   }
 
-  // 4. Pick the lowest-numbered eligible ticket per stage.
+  // 4. Merge passed tickets (or wait for CI or a human).
+  for (const t of tickets.filter((t) => t.status === "QA" && t.passedSha !== undefined)) {
+    try {
+      if (await mergePassed({ ...deps, board, log }, t, t.passedSha!)) t.status = "Done";
+    } catch (e) {
+      log(t.number, "merge check failed", (e as Error).message);
+    }
+  }
+
+  // 5. Pick the lowest-numbered eligible ticket per stage.
   const picked = new Set<number>();
   const picks: { stage: StageConfig; ticket: Ticket }[] = [];
   for (const stage of settings.stages) {
@@ -109,7 +123,7 @@ export async function runCycle(deps: CycleDeps): Promise<void> {
     return;
   }
 
-  // 5. Run the picks; stages run at the same time.
+  // 6. Run the picks; stages run at the same time.
   await Promise.all(picks.map(({ stage, ticket }) => runPick({ ...deps, board, log }, stage, ticket)));
 }
 
@@ -131,8 +145,10 @@ async function runPick(deps: CycleDeps, stage: StageConfig, ticket: Ticket): Pro
       ticket.failedRuns = 0;
     }
     let outcome: AgentRunOutcome;
+    let headSha = "";
     try {
       const wt = await deps.worktrees.prepare(n, stage.name);
+      headSha = wt.headSha;
       try {
         log(n, `run ${stage.name}`, `round ${ticket.round} in ${wt.path}`);
         outcome = await deps.agents[stage.name].run({
@@ -148,7 +164,7 @@ async function runPick(deps: CycleDeps, stage: StageConfig, ticket: Ticket): Pro
     } catch (e) {
       outcome = { kind: "crashed", error: (e as Error).message, transcript: "" };
     }
-    await applyOutcome(deps, stage, ticket, outcome);
+    await applyOutcome(deps, stage, ticket, outcome, headSha);
   } catch (e) {
     log(n, "error", (e as Error).message);
   } finally {
@@ -156,7 +172,53 @@ async function runPick(deps: CycleDeps, stage: StageConfig, ticket: Ticket): Pro
   }
 }
 
-async function applyOutcome(deps: CycleDeps, stage: StageConfig, ticket: Ticket, outcome: AgentRunOutcome) {
+/**
+ * A QA ticket with a recorded pass: Done if its pull request is merged; otherwise,
+ * unless supervised, squash-merge at the tested sha once CI is green.
+ * Returns true when the ticket moved to Done.
+ */
+async function mergePassed(deps: CycleDeps, t: Ticket, sha: string): Promise<boolean> {
+  const { board, log, settings, dryRun = false } = deps;
+  const n = t.number;
+  const pr = await deps.pulls.forTicket(n);
+  if (!pr) {
+    log(n, "waiting", `no pull request on foreman/ticket-${n}`);
+    return false;
+  }
+  if (pr.state === "merged") {
+    const reason = `pull request #${pr.number} merged`;
+    if (dryRun) log(n, "would move Done", reason);
+    else if (!(await attempt(log, n, "move Done", reason, () => board.move(n, "Done", reason)))) return false;
+    return true;
+  }
+  if (settings.autonomy === "supervised") {
+    log(n, "waiting", "for a human to merge");
+    return false;
+  }
+  const ci = await deps.pulls.ciStatus(sha);
+  if (ci !== "green") {
+    log(n, "waiting", `CI ${ci} on ${sha}`);
+    return false;
+  }
+  const reason = `merged #${pr.number} at ${sha}`;
+  if (dryRun) {
+    log(n, "would merge", `#${pr.number} at ${sha}, CI green`);
+    return false;
+  }
+  if (!(await attempt(log, n, "merge", `#${pr.number} at ${sha}, CI green`, () => deps.pulls.squashMerge(pr.number, sha)))) {
+    return false;
+  }
+  // If this move fails, the next cycle sees the merged pull request and moves the ticket.
+  return attempt(log, n, "move Done", reason, () => board.move(n, "Done", reason));
+}
+
+async function applyOutcome(
+  deps: CycleDeps,
+  stage: StageConfig,
+  ticket: Ticket,
+  outcome: AgentRunOutcome,
+  headSha: string,
+) {
   const { board, log, settings } = deps;
   const n = ticket.number;
 
@@ -176,9 +238,19 @@ async function applyOutcome(deps: CycleDeps, stage: StageConfig, ticket: Ticket,
   const tr = stage.on[r.result];
   if (!tr) return runFailed(deps, ticket, `stage ${stage.name} has no rule for result ${r.result}`);
 
+  // Rules enforced on top of the stage table: a pass needs evidence and merges
+  // later; a build needs an open pull request and a diff within maxDiffLines.
+  if (r.result === "pass") return acceptPass(deps, stage, ticket, headSha);
   if (tr.action === "retry") {
     log(n, "retry", `${r.result}: ${tr.log}`);
     return;
+  }
+  let to = tr.to;
+  let reason = r.reason ? `${r.result}: ${r.reason}` : r.result;
+  if (r.result === "built") {
+    const tooBig = await checkBuild(deps, ticket);
+    if (tooBig === undefined) return;
+    if (tooBig) [to, reason] = ["Needs human", tooBig];
   }
   if (tr.countRound && ticket.round >= settings.maxRounds) {
     const reason = `round cap ${settings.maxRounds} reached`;
@@ -187,9 +259,54 @@ async function applyOutcome(deps: CycleDeps, stage: StageConfig, ticket: Ticket,
     return;
   }
   if (tr.countRound) await board.setRound(n, ticket.round + 1);
-  const reason = r.reason ? `${r.result}: ${r.reason}` : r.result;
-  await board.move(n, tr.to, reason);
-  log(n, `move ${tr.to}`, reason);
+  await board.move(n, to, reason);
+  log(n, `move ${to}`, reason);
+}
+
+/**
+ * After `built`: the ticket needs an open pull request. Names files outside
+ * "Files likely touched" in one comment. Returns the Needs human reason when the
+ * diff is over maxDiffLines, "" when it may go on, or undefined after a failed run.
+ */
+async function checkBuild(deps: CycleDeps, ticket: Ticket): Promise<string | undefined> {
+  const { board, log, settings } = deps;
+  const n = ticket.number;
+  const pr = await deps.pulls.forTicket(n);
+  if (!pr || pr.state !== "open") {
+    await runFailed(deps, ticket, `built but no open pull request on foreman/ticket-${n}`);
+    return undefined;
+  }
+  const files = await deps.pulls.files(pr.number);
+  const listed = new Set(ticket.body?.filesLikelyTouched ?? []);
+  const outside = files.paths.filter((p) => !listed.has(p));
+  if (outside.length) {
+    const list = outside.map((p) => `- ${p}`).join("\n");
+    await board.comment(n, `Files outside "Files likely touched":\n${list}`);
+    log(n, "comment", `${outside.length} files outside "Files likely touched"`);
+  }
+  if (files.changedLines > settings.maxDiffLines) {
+    return `diff of ${files.changedLines} lines exceeds maxDiffLines ${settings.maxDiffLines}`;
+  }
+  return "";
+}
+
+/**
+ * After `pass`: every test case needs evidence in the report posted since this
+ * run's claim. Records the tested sha; the merge happens in a later cycle.
+ */
+async function acceptPass(deps: CycleDeps, stage: StageConfig, ticket: Ticket, headSha: string): Promise<void> {
+  const { board, log } = deps;
+  const n = ticket.number;
+  const all = await board.comments(n);
+  const claimAt = all.findLastIndex((c) => {
+    const e = parseComment(c);
+    return e?.kind === "claim" && e.stage === stage.name;
+  });
+  const since = claimAt < 0 ? [] : all.slice(claimAt + 1);
+  const problems = checkEvidence(ticket.body?.testCases ?? [], since);
+  if (problems.length) return runFailed(deps, ticket, `pass rejected: ${problems.join("; ")}`);
+  await board.recordPassed(n, headSha);
+  log(n, "record pass", `tested ${headSha}, waiting to merge`);
 }
 
 async function runFailed(deps: CycleDeps, ticket: Ticket, reason: string): Promise<void> {

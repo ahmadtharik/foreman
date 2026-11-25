@@ -4,7 +4,7 @@ import type { AgentRunOutcome } from "../src/agent/types.ts";
 import { DEFAULTS, type Settings } from "../src/config.ts";
 import { runCycle } from "../src/runner/cycle.ts";
 import type { ResultKind, StageName, Ticket } from "../src/types.ts";
-import { FakeAgent, FakeBoard, FakeWorktrees, fakeTicket } from "./fakes.ts";
+import { FakeAgent, FakeBoard, FakePulls, FakeWorktrees, fakeTicket } from "./fakes.ts";
 
 const NOW = new Date("2026-11-24T12:00:00Z");
 const minutesAgo = (m: number) => new Date(NOW.getTime() - m * 60_000);
@@ -23,18 +23,42 @@ function result(stage: StageName, ticket: number, kind: ResultKind, reason?: str
   return r;
 }
 
+/** A reviewer report: `Result: PASS`, then one row per [id, result, evidence]. */
+function report(rows: [id: string, result: string, evidence: string][]): string {
+  return [
+    "Result: PASS",
+    "Round: 1",
+    "",
+    "| # | Result | Evidence |",
+    "|---|--------|----------|",
+    ...rows.map(([id, r, e]) => `| ${id} | ${r} | ${e} |`),
+    "",
+    "Outside test cases: nothing",
+  ].join("\n");
+}
+
+/** A review run that posts `body` on the ticket, then returns `pass`. */
+function passWith(board: FakeBoard, n: number, body: string) {
+  return () => {
+    board.addComment(n, body);
+    return result("review", n, "pass");
+  };
+}
+
 function setup(tickets: Ticket[], opts: { build?: FakeAgent; review?: FakeAgent; secrets?: string[]; settings?: Settings } = {}) {
   const cfg = opts.settings ?? settings;
   const board = new FakeBoard(tickets, { claimTimeoutMin: settings.claimTimeoutMin, now: () => NOW });
   const build = opts.build ?? new FakeAgent();
   const review = opts.review ?? new FakeAgent();
   const worktrees = new FakeWorktrees();
+  const pulls = new FakePulls();
   const logs: string[] = [];
   const cycle = (extra: { dryRun?: boolean; runnerId?: string } = {}) =>
     runCycle({
       board,
       agents: { build, review },
       worktrees,
+      pulls,
       settings: cfg,
       runnerId: extra.runnerId ?? "runner-1",
       now: () => NOW,
@@ -42,7 +66,7 @@ function setup(tickets: Ticket[], opts: { build?: FakeAgent; review?: FakeAgent;
       dryRun: extra.dryRun,
       secrets: opts.secrets,
     });
-  return { board, build, review, worktrees, logs, cycle };
+  return { board, build, review, worktrees, pulls, logs, cycle };
 }
 
 const reviewOnly: Settings = { ...settings, stages: settings.stages.filter((s) => s.name === "review") };
@@ -116,13 +140,16 @@ test("3: picks only eligible tickets, one per stage, lowest number first", async
 for (const [stage, from, kind, to] of [
   ["build", "Ready", "built", "QA"],
   ["build", "Ready", "blocked", "Needs human"],
-  ["review", "QA", "pass", "Done"],
+  ["review", "QA", "pass", "QA"], // a pass records the sha; the merge step moves it to Done later
   ["review", "QA", "test-case-wrong", "Needs human"],
   ["review", "QA", "environment", "QA"],
 ] as const) {
   test(`4: ${stage} ${kind} ends in ${to} with no round added`, async () => {
-    const agent = new FakeAgent(result(stage, 20, kind, kind === "built" || kind === "pass" ? undefined : "why"));
-    const { board, worktrees, cycle } = setup([fakeTicket({ number: 20, status: from })], { [stage]: agent });
+    const agent = new FakeAgent();
+    const { board, worktrees, pulls, cycle } = setup([fakeTicket({ number: 20, status: from })], { [stage]: agent });
+    if (kind === "pass") agent.queue.push(passWith(board, 20, report([["1", "pass", "exit 0"]])));
+    else agent.queue.push(result(stage, 20, kind, kind === "built" ? undefined : "why"));
+    pulls.open(20, 50, { paths: ["src/x.ts"], changedLines: 10 });
     await cycle();
     assert.equal(status(board, 20), to);
     assert.equal(board.callsFor(20, "setRound").length, 0);
@@ -202,7 +229,8 @@ test("8: a claim left by a killed runner is released once stale and picked again
   );
   await cycle({ runnerId: "new-runner" });
   const methods = board.callsFor(14).filter((c) => c.method !== "get").map((c) => c.method);
-  assert.deepEqual(methods, ["release", "claim", "move", "release"]);
+  // The pass has no report, so it is rejected as a failed run.
+  assert.deepEqual(methods, ["release", "claim", "comments", "recordRunFailed", "release"]);
   assert.match(board.callsFor(14, "release")[0]!.args[0] as string, /^stale claim by old-runner/);
   assert.deepEqual(board.callsFor(14, "claim")[0]!.args, ["review", "new-runner"]);
   assert.equal(review.runs.length, 1);
@@ -241,4 +269,145 @@ test("10: secrets never reach the board or the log", async () => {
   assert.ok(board.texts.every((t) => !t.includes("tok-123")));
   assert.ok(logs.every((l) => !l.includes("tok-123")));
   assert.match(lastMoveReason(board, 40) as string, /\*\*\*/);
+});
+
+// Ticket #24: diff check after a build, evidence check on a pass, merge on green CI.
+
+test("24.3: a pass without a report stays in QA as a failed run and is reviewed again", async () => {
+  const review = new FakeAgent(result("review", 20, "pass"), result("review", 20, "pass"));
+  const { board, cycle } = setup([fakeTicket({ number: 20, status: "QA" })], { review });
+  // A report from before this run's claim does not count.
+  board.addComment(20, report([["1", "pass", "exit 0"]]));
+  await cycle();
+  assert.equal(status(board, 20), "QA");
+  const failed = board.callsFor(20, "recordRunFailed");
+  assert.equal(failed.length, 1);
+  assert.match(failed[0]!.args[0] as string, /^pass rejected: no PASS report$/);
+  assert.equal(board.callsFor(20, "recordPassed").length, 0);
+
+  await cycle();
+  assert.equal(review.runs.length, 2);
+});
+
+test("24.4: a pass with full evidence records the tested sha and does not merge yet", async () => {
+  const review = new FakeAgent();
+  const { board, worktrees, pulls, cycle } = setup([fakeTicket({ number: 21, status: "QA", cases: ["1", "2"] })], { review });
+  worktrees.headSha = "abc";
+  pulls.open(21, 31);
+  pulls.ci.set("abc", "green");
+  review.queue.push(passWith(board, 21, report([["1", "pass", "exit 0"], ["2", "pass", "screenshot.png"]])));
+  await cycle();
+  assert.deepEqual(board.callsFor(21, "recordPassed").map((c) => c.args), [["abc"]]);
+  assert.equal(status(board, 21), "QA");
+  assert.equal(board.tickets.get(21)!.passedSha, "abc");
+  assert.equal(pulls.merges.length, 0);
+});
+
+test("24.4b: a pass missing evidence for one case names it", async () => {
+  const review = new FakeAgent();
+  const { board, cycle } = setup([fakeTicket({ number: 21, status: "QA", cases: ["1", "2"] })], { review });
+  review.queue.push(passWith(board, 21, report([["1", "pass", "exit 0"], ["2", "pass", "n/a"]])));
+  await cycle();
+  assert.deepEqual(board.callsFor(21, "recordRunFailed")[0]!.args, ["pass rejected: no evidence for test case 2"]);
+  assert.equal(board.callsFor(21, "recordPassed").length, 0);
+});
+
+test("24.5: a passed ticket merges at the recorded sha only when CI is green", async () => {
+  const { board, pulls, cycle } = setup([fakeTicket({ number: 22, status: "QA", passedSha: "abc" })]);
+  pulls.open(22, 30);
+  for (const ci of ["pending", "red"] as const) {
+    pulls.ci.set("abc", ci);
+    await cycle();
+    assert.equal(pulls.merges.length, 0, ci);
+    assert.equal(status(board, 22), "QA", ci);
+  }
+  pulls.ci.set("abc", "green");
+  await cycle();
+  assert.deepEqual(pulls.merges, [[30, "abc"]]);
+  assert.equal(status(board, 22), "Done");
+  assert.equal(lastMoveReason(board, 22), "merged #30 at abc");
+});
+
+test("24.5b: a rejected merge is logged and the ticket stays in QA", async () => {
+  const { board, pulls, logs, cycle } = setup([fakeTicket({ number: 22, status: "QA", passedSha: "abc" })]);
+  pulls.open(22, 30);
+  pulls.ci.set("abc", "green");
+  pulls.mergeError = new Error("405 head moved");
+  await cycle();
+  assert.equal(status(board, 22), "QA");
+  assert.ok(logs.includes("#22 merge failed: 405 head moved"), logs.join("\n"));
+});
+
+test("24.5c: dry run logs would merge or the waiting line and writes nothing", async () => {
+  const { board, pulls, logs, cycle } = setup([
+    fakeTicket({ number: 22, status: "QA", passedSha: "abc" }),
+    fakeTicket({ number: 23, status: "QA", passedSha: "def" }),
+  ]);
+  pulls.open(22, 30);
+  pulls.open(23, 31);
+  pulls.ci.set("abc", "green");
+  await cycle({ dryRun: true });
+  assert.equal(board.writes.length, 0);
+  assert.equal(pulls.merges.length, 0);
+  assert.ok(logs.includes("#22 would merge: #30 at abc, CI green"), logs.join("\n"));
+  assert.ok(logs.includes("#23 waiting: CI pending on def"), logs.join("\n"));
+});
+
+test("24.6: supervised mode never merges and moves to Done once a human merged", async () => {
+  const { board, pulls, cycle } = setup([fakeTicket({ number: 23, status: "QA", passedSha: "abc" })], {
+    settings: { ...settings, autonomy: "supervised" },
+  });
+  const pr = pulls.open(23, 33);
+  pulls.ci.set("abc", "green");
+  await cycle();
+  assert.equal(status(board, 23), "QA");
+  pulls.byTicket.set(23, { ...pr, state: "merged" });
+  await cycle();
+  assert.equal(pulls.merges.length, 0);
+  assert.equal(status(board, 23), "Done");
+  assert.equal(lastMoveReason(board, 23), "pull request #33 merged");
+});
+
+test("24.7: after a build, outside files get one comment; a diff over maxDiffLines goes to Needs human", async () => {
+  for (const [lines, to] of [[120, "QA"], [601, "Needs human"]] as const) {
+    const build = new FakeAgent(result("build", 24, "built"));
+    const { board, pulls, cycle } = setup([fakeTicket({ number: 24, status: "Ready", files: ["src/a.ts"] })], { build });
+    pulls.open(24, 40, { paths: ["src/a.ts", "src/b.ts"], changedLines: lines });
+    await cycle();
+    const comments = board.callsFor(24, "comment").map((c) => c.args[0] as string);
+    assert.equal(comments.length, 1);
+    assert.ok(comments[0]!.startsWith('Files outside "Files likely touched":'));
+    assert.ok(comments[0]!.includes("src/b.ts") && !comments[0]!.includes("src/a.ts"));
+    assert.equal(status(board, 24), to);
+    if (to === "Needs human") assert.equal(lastMoveReason(board, 24), "diff of 601 lines exceeds maxDiffLines 600");
+  }
+});
+
+test("24.7b: no comment when every file is listed", async () => {
+  const build = new FakeAgent(result("build", 24, "built"));
+  const { board, pulls, cycle } = setup([fakeTicket({ number: 24, status: "Ready", files: ["src/a.ts"] })], { build });
+  pulls.open(24, 40, { paths: ["src/a.ts"], changedLines: 5 });
+  await cycle();
+  assert.equal(board.callsFor(24, "comment").length, 0);
+  assert.equal(status(board, 24), "QA");
+});
+
+test("24.8: built with no open pull request is a failed run", async () => {
+  const build = new FakeAgent(result("build", 25, "built"));
+  const { board, cycle } = setup([fakeTicket({ number: 25, status: "Ready" })], { build });
+  await cycle();
+  assert.deepEqual(board.callsFor(25, "recordRunFailed")[0]!.args, ["built but no open pull request on foreman/ticket-25"]);
+  assert.equal(status(board, 25), "In progress");
+});
+
+test("24.9: a new runner carries a recorded pass on to the merge from the board alone", async () => {
+  const build = new FakeAgent();
+  const review = new FakeAgent();
+  const { board, pulls, cycle } = setup([fakeTicket({ number: 26, status: "QA", passedSha: "def" })], { build, review });
+  pulls.open(26, 36);
+  pulls.ci.set("def", "green");
+  await cycle({ runnerId: "fresh-runner" });
+  assert.deepEqual(pulls.merges, [[36, "def"]]);
+  assert.equal(status(board, 26), "Done");
+  assert.equal(build.runs.length + review.runs.length, 0);
 });

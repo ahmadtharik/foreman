@@ -1,12 +1,14 @@
-// In-memory fakes for the board, the agents and the worktrees. No network, git or Claude Code.
+// In-memory fakes for the board, the agents, the worktrees and the pull requests. No network, git or Claude Code.
 import type { AgentAdapter, AgentRunInput, AgentRunOutcome } from "../src/agent/types.ts";
+import { formatClaim, formatMove, formatPassed, formatRelease, formatRunFailed } from "../src/board/comments.ts";
 import type { BoardAdapter } from "../src/board/types.ts";
+import type { CiStatus, PullFiles, PullRequest, Pulls } from "../src/github/pulls.ts";
 import type { PreparedWorktree, Worktrees } from "../src/runner/worktree.ts";
 import { parseTicket } from "../src/ticket.ts";
 import type { Claim, StageName, Status, Ticket } from "../src/types.ts";
 
-/** A ticket body that matches the template, with the given dependencies. */
-export function ticketBody(dependencies: number[] = []): string {
+/** A ticket body that matches the template, with the given dependencies, test case ids and files. */
+export function ticketBody(dependencies: number[] = [], cases: string[] = ["1"], files: string[] = ["src/x.ts"]): string {
   return [
     "## Summary",
     "Do a thing.",
@@ -17,11 +19,11 @@ export function ticketBody(dependencies: number[] = []): string {
     "## Test cases",
     "| # | Type | Steps | Expected result |",
     "|---|------|-------|-----------------|",
-    "| 1 | check | Run it | It exits 0 |",
+    ...cases.map((id) => `| ${id} | check | Run it | It exits 0 |`),
     "## Dependencies",
     dependencies.length ? dependencies.map((d) => `- #${d}`).join("\n") : "None",
     "## Files likely touched",
-    "- src/x.ts",
+    ...files.map((f) => `- ${f}`),
     "## Out of scope",
     "Everything else.",
   ].join("\n");
@@ -31,6 +33,10 @@ export interface FakeTicketInput {
   number: number;
   status: Status;
   deps?: number[];
+  /** Test case ids; default ["1"]. */
+  cases?: string[];
+  /** Files likely touched; default ["src/x.ts"]. */
+  files?: string[];
   rawBody?: string;
   round?: number;
   claim?: Claim;
@@ -40,7 +46,7 @@ export interface FakeTicketInput {
 }
 
 export function fakeTicket(input: FakeTicketInput): Ticket {
-  const rawBody = input.rawBody ?? ticketBody(input.deps);
+  const rawBody = input.rawBody ?? ticketBody(input.deps, input.cases, input.files);
   const t: Ticket = {
     number: input.number,
     title: `Ticket ${input.number}`,
@@ -77,6 +83,8 @@ export class FakeBoard implements BoardAdapter {
   readonly calls: BoardCall[] = [];
   /** Every text written to the board. */
   readonly texts: string[] = [];
+  /** Comment bodies per ticket, oldest first, as the GitHub board would write them. */
+  readonly commentBodies = new Map<number, string[]>();
   readonly claimTimeoutMin: number;
   readonly now: () => Date;
 
@@ -98,6 +106,13 @@ export class FakeBoard implements BoardAdapter {
     const t = this.tickets.get(number);
     if (!t) throw new Error(`#${number} not found`);
     return t;
+  }
+
+  /** A comment written by someone other than the runner, e.g. the reviewer's report. */
+  addComment(number: number, body: string): void {
+    const list = this.commentBodies.get(number) ?? [];
+    list.push(body);
+    this.commentBodies.set(number, list);
   }
 
   #record(method: string, number: number, ...args: unknown[]): void {
@@ -135,18 +150,21 @@ export class FakeBoard implements BoardAdapter {
       throw new Error(`#${number} is already claimed by ${t.claim.by}`);
     }
     t.claim = { by, stage, at: now };
+    this.addComment(number, formatClaim(t.claim));
     return structuredClone(t.claim);
   }
 
   async release(number: number, reason: string): Promise<void> {
     this.#record("release", number, reason);
     delete this.#t(number).claim;
+    this.addComment(number, formatRelease(reason));
   }
 
   async move(number: number, to: Status, reason: string): Promise<void> {
     this.#record("move", number, to, reason);
     const t = this.#t(number);
     const from = t.status;
+    this.addComment(number, formatMove(from, to, reason));
     t.status = to;
     t.failedRuns = 0;
     delete t.passedSha;
@@ -161,21 +179,24 @@ export class FakeBoard implements BoardAdapter {
 
   async comment(number: number, body: string): Promise<void> {
     this.#record("comment", number, body);
+    this.addComment(number, body);
   }
 
   async recordRunFailed(number: number, reason: string): Promise<void> {
     this.#record("recordRunFailed", number, reason);
     this.#t(number).failedRuns++;
+    this.addComment(number, formatRunFailed(reason));
   }
 
   async recordPassed(number: number, sha: string): Promise<void> {
     this.#record("recordPassed", number, sha);
     this.#t(number).passedSha = sha;
+    this.addComment(number, formatPassed(sha));
   }
 
   async comments(number: number): Promise<string[]> {
     this.#record("comments", number);
-    return [];
+    return [...(this.commentBodies.get(number) ?? [])];
   }
 }
 
@@ -201,13 +222,72 @@ export class FakeAgent implements AgentAdapter {
 /** Worktrees that only record calls. */
 export class FakeWorktrees implements Worktrees {
   readonly calls: { method: "prepare" | "remove"; args: unknown[] }[] = [];
+  headSha = "abc123";
 
   async prepare(ticket: number, stage: StageName): Promise<PreparedWorktree> {
     this.calls.push({ method: "prepare", args: [ticket, stage] });
-    return { path: `/runs/ticket-${ticket}-${stage}`, branch: `foreman/ticket-${ticket}`, headSha: "abc123" };
+    return { path: `/runs/ticket-${ticket}-${stage}`, branch: `foreman/ticket-${ticket}`, headSha: this.headSha };
   }
 
   async remove(path: string): Promise<void> {
     this.calls.push({ method: "remove", args: [path] });
+  }
+}
+
+export interface PullsCall {
+  method: "forTicket" | "files" | "ciStatus" | "squashMerge";
+  args: unknown[];
+}
+
+/** Pull requests in memory: one per ticket, files per pull request, CI per sha. */
+export class FakePulls implements Pulls {
+  readonly calls: PullsCall[] = [];
+  /** The pull request `forTicket` returns, by ticket number. */
+  readonly byTicket = new Map<number, PullRequest>();
+  readonly filesByPr = new Map<number, PullFiles>();
+  readonly ci = new Map<string, CiStatus>();
+  /** When set, `squashMerge` rejects with it. */
+  mergeError?: Error;
+
+  /** Adds an open pull request for `ticket` and returns it. */
+  open(ticket: number, pr: number, files: PullFiles = { paths: [], changedLines: 0 }): PullRequest {
+    const p: PullRequest = {
+      number: pr,
+      url: `https://github.com/owner/target/pull/${pr}`,
+      headRef: `foreman/ticket-${ticket}`,
+      headSha: "head",
+      state: "open",
+    };
+    this.byTicket.set(ticket, p);
+    this.filesByPr.set(pr, files);
+    return p;
+  }
+
+  get merges(): unknown[][] {
+    return this.calls.filter((c) => c.method === "squashMerge").map((c) => c.args);
+  }
+
+  async forTicket(ticket: number): Promise<PullRequest | undefined> {
+    this.calls.push({ method: "forTicket", args: [ticket] });
+    const p = this.byTicket.get(ticket);
+    return p && { ...p };
+  }
+
+  async files(pr: number): Promise<PullFiles> {
+    this.calls.push({ method: "files", args: [pr] });
+    const f = this.filesByPr.get(pr);
+    if (!f) throw new Error(`no files for pull request #${pr}`);
+    return structuredClone(f);
+  }
+
+  async ciStatus(sha: string): Promise<CiStatus> {
+    this.calls.push({ method: "ciStatus", args: [sha] });
+    return this.ci.get(sha) ?? "pending";
+  }
+
+  async squashMerge(pr: number, sha: string): Promise<void> {
+    this.calls.push({ method: "squashMerge", args: [pr, sha] });
+    if (this.mergeError) throw this.mergeError;
+    for (const p of this.byTicket.values()) if (p.number === pr) p.state = "merged";
   }
 }
