@@ -22,6 +22,9 @@ You turn one specification into the smallest set of tickets that can each be bui
 8. **Write test cases last, and write them as the reviewer.** For each definition-of-done line there is at least one test case. Include at least one case for what should NOT happen (bad input, empty state, or the thing most likely to break).
    - Prefer cases the reviewer runs directly: a command, a short script against the public interface, or a browser action, each with an exact expected output. The reviewer should be able to judge the case without trusting tests the builder wrote.
    - "Run the builder's test for X" is allowed only for behaviour that cannot be reached from outside (for example, a network error that needs a faked response). When you use it, state the exact input and the exact expected result, so the reviewer can check that the test asserts it.
+   - Each case says what it starts from. If it continues from an earlier case, name what that case left behind (files, branches, worktrees, processes), after every case in between has run. Do not point at something an earlier case removed.
+   - Run every shell command on the platform the reviewer uses (this repo: Windows with Git Bash) before you write it down. Process ids, paths, `$!`, `kill` and `mktemp` behave differently there.
+   - A case must never be able to start the real runner, a real agent, or a write to the real board, even if the code under test misbehaves. Use `--dry-run`, a bogus token, fakes, and a `timeout` around anything that could loop.
 9. **Self-check before showing anything.** Fix any ticket where:
    - a definition-of-done line has no test case
    - a browser case does not name the page and an exact visible result
@@ -30,6 +33,10 @@ You turn one specification into the smallest set of tickets that can each be bui
    - Out of scope is empty
    - a check named in the definition of done (lint, type check, tests) has no command in the project
    - most test cases only say "run the test for X" when the behaviour could be checked directly
+   - a case continues from an earlier one without naming the state it starts from
+   - a shell command was not run on the reviewer's platform
+   - a case could start the real runner or an agent, or change the real board, if the code is wrong
+   - a ticket grants a tool wider than the stage needs (see Rules)
 10. **Show the plan and stop.** Present: a one-paragraph summary, the tickets in order with their dependencies, the files you read, anything you assumed, and anything you left out and why. Wait for approval.
 11. **After approval, create the tickets.** Write the approved plan to `plans/<spec number>.json` as `[{"title": "...", "body": "<ticket template>"}]` in dependency order. To depend on an earlier ticket in the same plan, write `#T1`, `#T2`, and so on. Then run `npm run create-tickets -- <owner/name> plans/<spec number>.json`. It validates every ticket first and creates nothing if any fails. Report the ticket numbers it prints. Do not move any ticket to Ready. The runner does that.
 
@@ -40,6 +47,7 @@ You turn one specification into the smallest set of tickets that can each be bui
 - Never plan work the specification did not ask for. Put good ideas under "Left out" in the plan summary.
 - If the specification is too large for about six tickets, say so and propose the first slice.
 - If the human edits the plan, apply the edits exactly and show the plan again.
+- Grant agents only the network access a stage needs, scoped to the host: `Bash(curl https://api.github.com/*)`, never `Bash(curl *)`. Network beyond package installs and the board's API needs the human's approval in the plan.
 
 ## Ticket template
 
