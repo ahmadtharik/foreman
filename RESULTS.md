@@ -56,7 +56,7 @@ Human interventions, all by design at this milestone:
 - Replaced test case 2 of #25 with a safe version before review.
 - Merged 6 pull requests after a passing review on green CI, each at the commit the reviewer tested.
 
-What the reviewers checked beyond the test cases: 10 extra probes on #23, 9 merge-safety probes on #24 (no merge on red or pending CI, none at an untested commit, none in supervised mode), a bad token against the live API on #21, and the token kept out of the log file on #25.
+What the reviewers checked beyond the test cases: 10 extra probe tests on #23, extra probes on #24 aimed at merge safety (no merge on red or pending CI, none at an untested commit, none in supervised mode), a bad token against the live API on #21, and the token kept out of the log file on #25.
 
 Gaps the reviewers noted, none of them a ticket failure:
 - #23: if a board write fails while a result is being applied, the claim is released but no failed run is recorded. The ticket stays where it was and is picked up again.
