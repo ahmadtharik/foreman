@@ -35,6 +35,17 @@ npm run check          # type check + unit tests
 npm run check:claude   # confirms a non-interactive run works on the plan
 ```
 
+## Runner
+
+Needs `foreman.config.json` (copy `foreman.config.example.json`) and `FOREMAN_GITHUB_TOKEN`.
+
+```
+npm run runner -- --dry-run   # one cycle: prints what it would do, changes nothing
+npm run runner                # runs a cycle every pollIntervalSec until stopped
+```
+
+Only one runner runs at a time (`foreman.lock`). Each action is logged to the console and to `logs/runner-<date>.log`.
+
 ## Development workflow
 
 - Work on a short branch (`f1-planner`, `fix-result-parser`), never directly on `main`.

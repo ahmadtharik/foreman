@@ -75,8 +75,8 @@ export const DEFAULTS: Omit<Settings, "targetRepo" | "targetPath" | "board" | "t
   maxDiffLines: 600,
   agentTimeoutMin: 45,
   allowedTools: {
-    build: ["Read", "Edit", "Write", "Glob", "Grep", "Bash(git *)", "Bash(npm *)", "Bash(npx *)"],
-    review: ["Read", "Glob", "Grep", "Bash(git *)", "Bash(npm *)", "Bash(npx playwright *)"],
+    build: ["Read", "Edit", "Write", "Glob", "Grep", "Bash(git *)", "Bash(npm *)", "Bash(npx *)", "Bash(curl https://api.github.com/*)"],
+    review: ["Read", "Glob", "Grep", "Bash(git *)", "Bash(npm *)", "Bash(npx playwright *)", "Bash(curl https://api.github.com/*)"],
   },
   stages: DEFAULT_STAGES,
 };

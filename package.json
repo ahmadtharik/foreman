@@ -12,7 +12,8 @@
     "check:claude": "node src/scripts/check-claude.ts",
     "setup:labels": "node src/scripts/setup-labels.ts",
     "create-tickets": "node src/scripts/create-tickets.ts",
-    "smoke:board": "node src/scripts/smoke-board.ts"
+    "smoke:board": "node src/scripts/smoke-board.ts",
+    "runner": "node src/scripts/runner.ts"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
