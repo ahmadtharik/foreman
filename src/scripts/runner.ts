@@ -6,7 +6,7 @@ import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { ClaudeCodeAgent } from "../agent/claude-code.ts";
 import { GitHubBoard } from "../board/github.ts";
-import { loadSettings } from "../config.ts";
+import { loadSettings, type Settings } from "../config.ts";
 import { GitHubPulls } from "../github/pulls.ts";
 import { runCycle, type CycleDeps, type CycleLog } from "../runner/cycle.ts";
 import { acquireLock, type Lock } from "../runner/lock.ts";
@@ -21,7 +21,13 @@ if (!token) {
 const dryRun = process.argv.includes("--dry-run");
 const redact = (s: string) => s.split(token).join("***");
 
-const settings = loadSettings();
+let settings: Settings;
+try {
+  settings = loadSettings();
+} catch (e) {
+  console.error((e as Error).message);
+  process.exit(1);
+}
 const writeLog = createLog({ dir: path.resolve("logs"), secrets: [token] });
 let logged = 0;
 const log: CycleLog = (ticket, action, reason) => {

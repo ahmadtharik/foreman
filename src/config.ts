@@ -82,7 +82,21 @@ export const DEFAULTS: Omit<Settings, "targetRepo" | "targetPath" | "board" | "t
 };
 
 export function loadSettings(path = "foreman.config.json"): Settings {
-  const raw = JSON.parse(readFileSync(path, "utf8")) as Partial<Settings>;
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new Error(`${path} not found. Copy foreman.config.example.json and edit it.`);
+    }
+    throw new Error(`cannot read ${path}: ${(e as Error).message}`);
+  }
+  let raw: Partial<Settings>;
+  try {
+    raw = JSON.parse(text) as Partial<Settings>;
+  } catch (e) {
+    throw new Error(`${path} is not valid JSON: ${(e as Error).message}`);
+  }
   const s = { ...DEFAULTS, ...raw } as Settings;
   validate(s);
   return s;
