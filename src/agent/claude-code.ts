@@ -40,29 +40,36 @@ export class ClaudeCodeAgent implements AgentAdapter {
     ];
 
     const { code, stdout, stderr } = await exec("claude", args, input.workdir, this.opts.timeoutMs, this.opts.keepEnv, prompt);
-    const transcript = stdout + (stderr ? `\n[stderr]\n${stderr}` : "");
+    return toOutcome(code, stdout, stderr);
+  }
+}
 
-    let text = stdout;
-    try {
-      const json = JSON.parse(stdout) as { result?: string; is_error?: boolean };
-      text = json.result ?? "";
-    } catch {
-      /* not JSON: fall back to raw stdout */
-    }
+/** Turns what `claude -p --output-format json` printed into a run outcome. */
+export function toOutcome(code: number | null, stdout: string, stderr: string): AgentRunOutcome {
+  const transcript = stdout + (stderr ? `\n[stderr]\n${stderr}` : "");
 
-    // TODO(F0): confirm the exact wording Claude Code uses when a plan limit is hit.
-    if (/usage limit|rate limit|limit reached/i.test(text + stderr)) {
-      return { kind: "usage-limit", transcript };
-    }
-    if (code !== 0 && !text.includes("FOREMAN-RESULT")) {
-      return { kind: "crashed", error: `exit ${code}: ${stderr.slice(0, 500)}`, transcript };
-    }
-    try {
-      return { kind: "result", result: parseResult(text), transcript };
-    } catch (e) {
-      if (e instanceof ResultParseError) return { kind: "no-result", error: e.message, transcript };
-      throw e;
-    }
+  let text = stdout;
+  try {
+    const json = JSON.parse(stdout) as { result?: string; is_error?: boolean };
+    text = json.result ?? "";
+  } catch {
+    /* not JSON: fall back to raw stdout */
+  }
+
+  // TODO(F0): confirm the exact wording Claude Code uses when a plan limit is hit.
+  if (/usage limit|rate limit|limit reached/i.test(text + stderr)) {
+    return { kind: "usage-limit", transcript };
+  }
+  if (code !== 0 && !text.includes("FOREMAN-RESULT")) {
+    // Claude Code reports errors such as a failed sign-in in the JSON result, not on stderr.
+    const reason = stderr.trim() || text.trim();
+    return { kind: "crashed", error: `exit ${code}: ${reason.slice(0, 500)}`, transcript };
+  }
+  try {
+    return { kind: "result", result: parseResult(text), transcript };
+  } catch (e) {
+    if (e instanceof ResultParseError) return { kind: "no-result", error: e.message, transcript };
+    throw e;
   }
 }
 
